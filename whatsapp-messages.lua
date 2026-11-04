@@ -1,14 +1,16 @@
 local manifest = {
   id = 'whatsapp-messages',
   name = 'WhatsApp messages',
-  version = '3.5',
+  version = '3.6',
   author = 'Aaron Hewitt',
   minApiVersion = 1,
   testedApiVersion = 1,
-  description = 'Reads each message in a WhatsApp chat as one item: sender, content, the message it replies to, and time. Play, playback speed and the other buttons in a message are in its Actions menu.',
+  description = 'Reads each message in a WhatsApp chat as one item: sender, content, the message it replies to, and time. Play, playback speed and the other buttons in a message are in its Actions menu. In the chat list, each contact is one item, without a separate item for its photo.',
   apps = {
     { package = 'com.whatsapp', activity = 'Conversation' },
     { package = 'com.whatsapp.w4b', activity = 'Conversation' },
+    { package = 'com.whatsapp', activity = 'HomeActivity' },
+    { package = 'com.whatsapp.w4b', activity = 'HomeActivity' },
   },
   permissions = { 'screen', 'actions', 'speech', 'input' },
   settings = { { key = 'expandLong', type = 'switch', title = 'Expand long messages', default = true } },
@@ -32,6 +34,9 @@ local manifest = {
     },
     -- A voice message's time, which counts up each second while it plays.
     { match = { id = 'description', inside = { parentId = 'list', className = 'ViewGroup' } }, silence = true },
+    -- In the chat list, a contact's photo is its own clickable node nested in the row, so it
+    -- would otherwise show up as a second item next to the row that opens the chat.
+    { match = { clickable = true, inside = { id = 'contact_row_container' } }, hide = 'all' },
   },
 }
 
