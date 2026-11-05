@@ -1,7 +1,7 @@
 local manifest = {
   id = 'whatsapp-messages',
   name = 'WhatsApp messages',
-  version = '3.11',
+  version = '3.12',
   author = 'Aaron Hewitt',
   minApiVersion = 2,
   testedApiVersion = 2,
@@ -529,7 +529,7 @@ local TOGGLE_DELAY = 200
 -- live: scrolling has no audible effect while one is playing), so a playing message is
 -- paused first and resumed after, detected by comparing the seek bar's position a moment
 -- apart rather than guessing control_btn's play/pause label text.
-local function seek(item, list, forward)
+local function seek(item, list, forward, count)
   local r = read_row(item, list)
   local seekBar = first(r, 'audio_seekbar')
   if not seekBar then
@@ -558,6 +558,11 @@ local function seek(item, list, forward)
   if playing then
     controlBtn:click()
   end
+  seekBar = seekBar:refresh() or seekBar
+  local range = seekBar.range
+  if range and count == focus_count then
+    sf.speak(string.format('%d s', math.floor(range.current / 1000)), { interrupt = true })
+  end
 end
 
 -- Returns false when the focus isn't on a message row at all, so the gesture falls through
@@ -568,7 +573,7 @@ local function on_seek_gesture(forward)
   if not list then
     return false
   end
-  sf.setTimeout(seek, 0, item, list, forward)
+  sf.setTimeout(seek, 0, item, list, forward, focus_count)
 end
 
 sf.onCommand('audioForward', function() return on_seek_gesture(true) end)
