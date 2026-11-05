@@ -1,7 +1,7 @@
 local manifest = {
   id = 'whatsapp-messages',
   name = 'WhatsApp messages',
-  version = '3.8',
+  version = '3.9',
   author = 'Aaron Hewitt',
   minApiVersion = 2,
   testedApiVersion = 2,
@@ -515,50 +515,69 @@ sf.onFocus(function(item, text)
   return false
 end)
 
--- How long to wait before reading the seek bar back, to let WhatsApp update its position
--- after scrollForward/scrollBackward.
-local SEEK_ANNOUNCE_DELAY = 150
+-- Time to tell whether the seek bar's position is currently advancing on its own (meaning
+-- the voice message is playing), and to give WhatsApp's pause/play and seek actions time to
+-- take effect.
+local PLAY_PROBE_DELAY = 80
+local TOGGLE_DELAY = 200
 
--- Speaks the voice message's new position once it has had time to update, unless focus
--- moved on in the meantime.
-local function announce_position(seekBar, count)
-  sf.setTimeout(function()
-    local fresh = seekBar:refresh() or seekBar
-    local range = fresh.range
-    if range and count == focus_count then
-      sf.speak(string.format('%d s', math.floor(range.current / 1000)), { interrupt = true })
-    end
-  end, SEEK_ANNOUNCE_DELAY)
-end
-
--- Seeks the voice message under accessibility focus one step forward or back.
+-- Seeks the given voice message row's audio_seekbar one step forward or back.
 -- audio_seekbar's own actions (checked live on a device) don't include setProgress, only
 -- scrollForward/scrollBackward -- the same idiom vertical-video-gestures.lua already uses
 -- for Instagram's Reels pager -- so WhatsApp's own step size is used instead of a fixed
--- number of seconds. Returns false when the focus isn't on a message row at all, so the
--- gesture falls through instead of being swallowed on other WhatsApp screens.
-local function seek(forward)
-  local item = sf.screen.focused()
-  local list = item and list_of(item)
-  if not list then
-    return false
-  end
+-- number of seconds. scrollForward/scrollBackward only move a *paused* message (confirmed
+-- live: scrolling has no audible effect while one is playing), so a playing message is
+-- paused first and resumed after, detected by comparing the seek bar's position a moment
+-- apart rather than guessing control_btn's play/pause label text.
+local function seek(item, list, forward, count)
   local r = read_row(item, list)
   local seekBar = first(r, 'audio_seekbar')
   if not seekBar then
     sf.playSound('beep')
     return
   end
+  local controlBtn = first(r, 'control_btn')
+  local playing = false
+  local before = seekBar.range and seekBar.range.current
+  if controlBtn and before then
+    sf.sleep(PLAY_PROBE_DELAY)
+    seekBar = seekBar:refresh() or seekBar
+    local after = seekBar.range and seekBar.range.current
+    playing = after ~= nil and after > before
+  end
+  if playing then
+    controlBtn:click()
+    sf.sleep(TOGGLE_DELAY)
+  end
   if forward then
     seekBar:scrollForward()
   else
     seekBar:scrollBackward()
   end
-  announce_position(seekBar, focus_count)
+  sf.sleep(TOGGLE_DELAY)
+  if playing then
+    controlBtn:click()
+  end
+  seekBar = seekBar:refresh() or seekBar
+  local range = seekBar.range
+  if range and count == focus_count then
+    sf.speak(string.format('%d s', math.floor(range.current / 1000)), { interrupt = true })
+  end
 end
 
-sf.onCommand('audioForward', function() return seek(true) end)
-sf.onCommand('audioBackward', function() return seek(false) end)
+-- Returns false when the focus isn't on a message row at all, so the gesture falls through
+-- instead of being swallowed on other WhatsApp screens.
+local function on_seek_gesture(forward)
+  local item = sf.screen.focused()
+  local list = item and list_of(item)
+  if not list then
+    return false
+  end
+  sf.setTimeout(seek, 0, item, list, forward, focus_count)
+end
+
+sf.onCommand('audioForward', function() return on_seek_gesture(true) end)
+sf.onCommand('audioBackward', function() return on_seek_gesture(false) end)
 
 local SKIPPED_BUTTONS = {
   name_in_group = true, contact_photo_view = true, url_layout = true, poll_option_vote_checkbox = true,
