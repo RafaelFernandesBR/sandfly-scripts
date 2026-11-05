@@ -1,11 +1,11 @@
 local manifest = {
   id = 'whatsapp-messages',
   name = 'WhatsApp messages',
-  version = '3.10',
+  version = '3.11',
   author = 'Aaron Hewitt',
   minApiVersion = 2,
   testedApiVersion = 2,
-  description = 'Reads each message in a WhatsApp chat as one item: sender, content, the message it replies to, and time. Play, playback speed and the other buttons in a message are in its Actions menu. In the chat list, each contact is one item, without a separate item for its photo. A two-finger swipe right/left advances or rewinds the focused voice message.',
+  description = 'Reads each message in a WhatsApp chat as one item: sender, content, the message it replies to, and time. Play, playback speed and the other buttons in a message are in its Actions menu. In the chat list, each contact is one item, without a separate item for its photo. A swipe left then right advances the focused voice message, right then left rewinds it.',
   apps = {
     { package = 'com.whatsapp', activity = 'Conversation' },
     { package = 'com.whatsapp.w4b', activity = 'Conversation' },
@@ -15,8 +15,8 @@ local manifest = {
   permissions = { 'screen', 'actions', 'speech', 'input' },
   settings = { { key = 'expandLong', type = 'switch', title = 'Expand long messages', default = true } },
   commands = {
-    { id = 'audioForward', title = 'Advance voice message', gesture = 'twoFingerSwipeRight' },
-    { id = 'audioBackward', title = 'Rewind voice message', gesture = 'twoFingerSwipeLeft' },
+    { id = 'audioForward', title = 'Advance voice message', gesture = 'swipeLeftThenRight' },
+    { id = 'audioBackward', title = 'Rewind voice message', gesture = 'swipeRightThenLeft' },
   },
   rules = {
     { match = { parentId = 'list', className = 'ViewGroup' }, group = true },
