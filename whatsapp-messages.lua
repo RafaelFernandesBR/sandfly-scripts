@@ -1,11 +1,11 @@
 local manifest = {
   id = 'whatsapp-messages',
   name = 'WhatsApp messages',
-  version = '3.6',
+  version = '3.7',
   author = 'Aaron Hewitt',
-  minApiVersion = 1,
-  testedApiVersion = 1,
-  description = 'Reads each message in a WhatsApp chat as one item: sender, content, the message it replies to, and time. Play, playback speed and the other buttons in a message are in its Actions menu. In the chat list, each contact is one item, without a separate item for its photo.',
+  minApiVersion = 2,
+  testedApiVersion = 2,
+  description = 'Reads each message in a WhatsApp chat as one item: sender, content, the message it replies to, and time. Play, playback speed and the other buttons in a message are in its Actions menu. In the chat list, each contact is one item, without a separate item for its photo. A two-finger swipe right/left advances or rewinds the focused voice message.',
   apps = {
     { package = 'com.whatsapp', activity = 'Conversation' },
     { package = 'com.whatsapp.w4b', activity = 'Conversation' },
@@ -14,6 +14,10 @@ local manifest = {
   },
   permissions = { 'screen', 'actions', 'speech', 'input' },
   settings = { { key = 'expandLong', type = 'switch', title = 'Expand long messages', default = true } },
+  commands = {
+    { id = 'audioForward', title = 'Advance voice message', gesture = 'twoFingerSwipeRight' },
+    { id = 'audioBackward', title = 'Rewind voice message', gesture = 'twoFingerSwipeLeft' },
+  },
   rules = {
     { match = { parentId = 'list', className = 'ViewGroup' }, group = true },
     -- A voice message, audio file, or other media still downloading has a play/pause or download
@@ -510,6 +514,40 @@ sf.onFocus(function(item, text)
   sf.setTimeout(say_row, 0, item, text, focus_count)
   return false
 end)
+
+-- One gesture moves the focused voice message by this many milliseconds.
+local SEEK_MS = 5000
+
+-- Seeks the voice message under accessibility focus by deltaMs (positive = forward).
+-- Returns false when the focus isn't on a message row at all, so the gesture falls
+-- through instead of being swallowed on other WhatsApp screens.
+local function seek(deltaMs)
+  local item = sf.screen.focused()
+  local list = item and list_of(item)
+  if not list then
+    return false
+  end
+  local r = read_row(item, list)
+  local seekBar = first(r, 'audio_seekbar')
+  if not seekBar then
+    sf.playSound('beep')
+    return
+  end
+  print('whatsapp-messages: audio_seekbar probe, range=', seekBar.range, 'actions=', seekBar.actions)
+  local range = seekBar.range
+  if range then
+    local newValue = math.max(range.min, math.min(range.max, range.current + deltaMs))
+    seekBar:setProgress(newValue)
+    sf.speak(string.format('%d s', math.floor(newValue / 1000)), { interrupt = true })
+  elseif deltaMs > 0 then
+    seekBar:scrollForward()
+  else
+    seekBar:scrollBackward()
+  end
+end
+
+sf.onCommand('audioForward', function() return seek(SEEK_MS) end)
+sf.onCommand('audioBackward', function() return seek(-SEEK_MS) end)
 
 local SKIPPED_BUTTONS = {
   name_in_group = true, contact_photo_view = true, url_layout = true, poll_option_vote_checkbox = true,
