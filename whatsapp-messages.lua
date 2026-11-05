@@ -1,7 +1,7 @@
 local manifest = {
   id = 'whatsapp-messages',
   name = 'WhatsApp messages',
-  version = '3.7',
+  version = '3.8',
   author = 'Aaron Hewitt',
   minApiVersion = 2,
   testedApiVersion = 2,
@@ -515,13 +515,29 @@ sf.onFocus(function(item, text)
   return false
 end)
 
--- One gesture moves the focused voice message by this many milliseconds.
-local SEEK_MS = 5000
+-- How long to wait before reading the seek bar back, to let WhatsApp update its position
+-- after scrollForward/scrollBackward.
+local SEEK_ANNOUNCE_DELAY = 150
 
--- Seeks the voice message under accessibility focus by deltaMs (positive = forward).
--- Returns false when the focus isn't on a message row at all, so the gesture falls
--- through instead of being swallowed on other WhatsApp screens.
-local function seek(deltaMs)
+-- Speaks the voice message's new position once it has had time to update, unless focus
+-- moved on in the meantime.
+local function announce_position(seekBar, count)
+  sf.setTimeout(function()
+    local fresh = seekBar:refresh() or seekBar
+    local range = fresh.range
+    if range and count == focus_count then
+      sf.speak(string.format('%d s', math.floor(range.current / 1000)), { interrupt = true })
+    end
+  end, SEEK_ANNOUNCE_DELAY)
+end
+
+-- Seeks the voice message under accessibility focus one step forward or back.
+-- audio_seekbar's own actions (checked live on a device) don't include setProgress, only
+-- scrollForward/scrollBackward -- the same idiom vertical-video-gestures.lua already uses
+-- for Instagram's Reels pager -- so WhatsApp's own step size is used instead of a fixed
+-- number of seconds. Returns false when the focus isn't on a message row at all, so the
+-- gesture falls through instead of being swallowed on other WhatsApp screens.
+local function seek(forward)
   local item = sf.screen.focused()
   local list = item and list_of(item)
   if not list then
@@ -533,21 +549,16 @@ local function seek(deltaMs)
     sf.playSound('beep')
     return
   end
-  print('whatsapp-messages: audio_seekbar probe, range=', seekBar.range, 'actions=', seekBar.actions)
-  local range = seekBar.range
-  if range then
-    local newValue = math.max(range.min, math.min(range.max, range.current + deltaMs))
-    seekBar:setProgress(newValue)
-    sf.speak(string.format('%d s', math.floor(newValue / 1000)), { interrupt = true })
-  elseif deltaMs > 0 then
+  if forward then
     seekBar:scrollForward()
   else
     seekBar:scrollBackward()
   end
+  announce_position(seekBar, focus_count)
 end
 
-sf.onCommand('audioForward', function() return seek(SEEK_MS) end)
-sf.onCommand('audioBackward', function() return seek(-SEEK_MS) end)
+sf.onCommand('audioForward', function() return seek(true) end)
+sf.onCommand('audioBackward', function() return seek(false) end)
 
 local SKIPPED_BUTTONS = {
   name_in_group = true, contact_photo_view = true, url_layout = true, poll_option_vote_checkbox = true,
