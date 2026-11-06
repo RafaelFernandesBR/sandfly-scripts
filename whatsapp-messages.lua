@@ -1,16 +1,18 @@
 local manifest = {
   id = 'whatsapp-messages',
   name = 'WhatsApp messages',
-  version = '3.12',
+  version = '3.13',
   author = 'Aaron Hewitt',
   minApiVersion = 2,
   testedApiVersion = 2,
-  description = 'Reads each message in a WhatsApp chat as one item: sender, content, the message it replies to, and time. Play, playback speed and the other buttons in a message are in its Actions menu. In the chat list, each contact is one item, without a separate item for its photo. A swipe left then right advances the focused voice message, right then left rewinds it.',
+  description = 'Reads each message in a WhatsApp chat as one item: sender, content, the message it replies to, and time. Play, playback speed and the other buttons in a message are in its Actions menu. In the chat list, each contact is one item, without a separate item for its photo. A swipe left then right advances the focused voice message, right then left rewinds it. Optionally describes downloaded photos, in chats and in status updates (never videos), using the Gemini API.',
   apps = {
     { package = 'com.whatsapp', activity = 'Conversation' },
     { package = 'com.whatsapp.w4b', activity = 'Conversation' },
     { package = 'com.whatsapp', activity = 'HomeActivity' },
     { package = 'com.whatsapp.w4b', activity = 'HomeActivity' },
+    { package = 'com.whatsapp', activity = 'StatusPlaybackActivity' },
+    { package = 'com.whatsapp.w4b', activity = 'StatusPlaybackActivity' },
   },
   permissions = { 'screen', 'actions', 'speech', 'input', 'java', 'network' },
   settings = {
@@ -509,6 +511,11 @@ sf.onWindowChange(function()
   chats = {}
 end)
 
+-- Waited out before capturing a photo to describe, so flicking past several photos quickly (in a
+-- chat or in status) doesn't take a screenshot and call the AI for every one of them -- only the
+-- one the user is still on once this much time has passed.
+local PHOTO_DEBOUNCE_MS = 250
+
 -- Describing a downloaded photo needs the image's actual bytes, which sf.screen never exposes
 -- (sf.screen.recognizeText only gives back OCR text, and the bitmap it captures internally is
 -- never handed to the script). The 'java' permission's raw LuaJava module is the only way around
@@ -633,14 +640,17 @@ local function fetch_description(base64)
   return description
 end
 
--- Captures the photo, asks the configured AI to describe it, and speaks the result -- unless the
--- user has already moved on to another row (count ~= focus_count) by the time it comes back.
+-- Captures the screenshot within [bounds], asks the configured AI to describe it, and speaks the
+-- result -- unless the user has moved on (count ~= focus_count) by the time it comes back. Used
+-- both for a downloaded photo in a chat and for a photo status: same bytes-via-java pipeline,
+-- same AI call, same staleness guard, so one function covers both call sites below.
 -- Failures of any kind (screenshot, network, parsing) are silent to speech (this is an optional
--- add-on to the row's normal spoken description, already said by the time this is called), but
--- a reason is printed either way, to the script's own Log screen, for diagnosis.
-local function describe_photo(r, count)
-  local image = first(r, 'image')
-  capture_base64(image and image.bounds, function(base64, capture_err)
+-- add-on to what SandFly already said), but are printed to the script's own Log screen.
+local function describe_photo(bounds, count)
+  if count ~= focus_count then
+    return
+  end
+  capture_base64(bounds, function(base64, capture_err)
     if not base64 then
       print('describe_photo: capture failed: ' .. tostring(capture_err))
       return
@@ -670,15 +680,29 @@ local function say_row(item, fallback, count)
   if count == focus_count and present(text) then
     sf.speak(text, { interrupt = true })
   end
-  if r and describe_photos and photo_downloaded(r) then
-    describe_photo(r, count)
+  local image = r and describe_photos and photo_downloaded(r) and first(r, 'image')
+  if image then
+    sf.setTimeout(describe_photo, PHOTO_DEBOUNCE_MS, image.bounds, count)
   end
 end
 
 sf.onFocus(function(item, text)
   focus_count = focus_count + 1
+  local id = short_id(item)
+  -- Confirmed live: WhatsApp's status_playback_image (not status_playback_video) is exactly what
+  -- SandFly's own accessibility-focus cursor lands on whenever the status shown changes -- even
+  -- though it reports focusable="false" in a plain view-hierarchy dump (that attribute is
+  -- Android's unrelated *input*-focus concept; accessibility focus is a separate, screen-reader-
+  -- only cursor that doesn't require it). A video status focuses status_playback_video instead,
+  -- which this simply never matches, so nothing is ever captured or sent for a video.
+  if id == 'status_playback_image' then
+    if describe_photos then
+      sf.setTimeout(describe_photo, PHOTO_DEBOUNCE_MS, item.bounds, focus_count)
+    end
+    return
+  end
   -- Only the id is looked at here, which needs no call to WhatsApp.
-  if short_id(item):sub(1, 17) ~= 'conversation_row_' then
+  if id:sub(1, 17) ~= 'conversation_row_' then
     return
   end
   -- sf.run would start reading at once, inside onFocus's time, and SandFly turns the script off
