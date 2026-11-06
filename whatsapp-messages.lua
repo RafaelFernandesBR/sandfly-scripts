@@ -12,8 +12,12 @@ local manifest = {
     { package = 'com.whatsapp', activity = 'HomeActivity' },
     { package = 'com.whatsapp.w4b', activity = 'HomeActivity' },
   },
-  permissions = { 'screen', 'actions', 'speech', 'input' },
-  settings = { { key = 'expandLong', type = 'switch', title = 'Expand long messages', default = true } },
+  permissions = { 'screen', 'actions', 'speech', 'input', 'java', 'network' },
+  settings = {
+    { key = 'expandLong', type = 'switch', title = 'Expand long messages', default = true },
+    { key = 'describePhotos', type = 'switch', title = 'Describe downloaded photos automatically', default = false },
+    { key = 'geminiApiKey', type = 'text', title = 'Gemini API key', default = '' },
+  },
   commands = {
     { id = 'audioForward', title = 'Advance voice message', gesture = 'swipeLeftThenRight' },
     { id = 'audioBackward', title = 'Rewind voice message', gesture = 'swipeRightThenLeft' },
@@ -340,6 +344,18 @@ local function photo_of(r)
   return label
 end
 
+-- Whether the photo is downloaded, checked the same way the manifest's own rules do: a photo (or
+-- any other media) still downloading has a play/pause or download button, control_btn (see the
+-- comment on the control_btn rule above). Unlike photo_of's "Enlarge photo" vs. "Photo 331 kB",
+-- this doesn't depend on WhatsApp's content-desc being in English -- confirmed live, this device's
+-- WhatsApp is in Portuguese and says "Aumentar foto" for a downloaded photo, not "Enlarge photo".
+local function photo_downloaded(r)
+  if short_id(r.node) ~= 'conversation_row_image' then
+    return false
+  end
+  return first(r, 'control_btn') == nil
+end
+
 -- The quote's frame and holder have no text of their own, so Android leaves them out of what a
 -- screen reader sees; only the quote's title and text are there.
 local function reply_of(r)
@@ -477,15 +493,168 @@ local function expand(row, list, read_more, count)
 end
 
 local expand_long = sf.settings.get('expandLong') ~= false
+local describe_photos = sf.settings.get('describePhotos') == true
+local gemini_api_key = sf.settings.get('geminiApiKey') or ''
 sf.onSettingChange(function(key, value)
   if key == 'expandLong' then
     expand_long = value ~= false
+  elseif key == 'describePhotos' then
+    describe_photos = value == true
+  elseif key == 'geminiApiKey' then
+    gemini_api_key = value or ''
   end
 end)
 
 sf.onWindowChange(function()
   chats = {}
 end)
+
+-- Describing a downloaded photo needs the image's actual bytes, which sf.screen never exposes
+-- (sf.screen.recognizeText only gives back OCR text, and the bitmap it captures internally is
+-- never handed to the script). The 'java' permission's raw LuaJava module is the only way around
+-- that: TalkBackService.getInstance() is the same AccessibilityService instance SandFly's own
+-- recognizeText calls takeScreenshot() on, so a script can call takeScreenshot() itself and keep
+-- the Bitmap instead of letting SandFly discard it after OCR. Confirmed live on device: LuaJava
+-- here needs ':' (not '.') for every method call, including static ones, and a java.proxy callback
+-- gets the proxy object itself as a leading argument before the real parameter.
+-- The device's language, the same source image-describer/main.lua uses (java.util.Locale),
+-- normalized the same way ("pt-BR" -> "pt_BR"). Falls back to pt_BR if java access fails for any
+-- reason, so a transient reflection problem doesn't block the description.
+local function device_language()
+  local ok, locale = pcall(function()
+    return java.import('java.util.Locale'):getDefault():toString()
+  end)
+  if ok and locale and locale ~= '' then
+    return (locale:gsub('%-%-?', '_'))
+  end
+  return 'pt_BR'
+end
+
+local function describe_prompt(language)
+  return 'Describe the image objectively in ' .. language .. ', providing a clear overview of visible elements for '
+    .. 'visually impaired users. Follow these rules strictly:\n\n'
+    .. '- Start with general scene (who/what/where).\n'
+    .. '- Highlight main action and key elements.\n'
+    .. '- Transcribe all visible text verbatim.\n'
+    .. '- Use present tense and active verbs.\n'
+    .. '- Focus on relevant visual information only.\n'
+    .. "- No introductions, opinions, 'image of', emojis, or redundant phrases.\n"
+    .. '- Answer only in ' .. language .. ', pure description.\n\n'
+    .. 'Describe following this exact structure.'
+end
+
+-- Crops [bitmap] to the node bounds [b] ({left,top,right,bottom}), clamped to the bitmap itself,
+-- same idea as SandFly's own ScriptScreen.cropped() for recognizeText.
+local function crop_to_bounds(Bitmap, bitmap, b)
+  if not b then
+    return bitmap
+  end
+  local left = math.max(b.left, 0)
+  local top = math.max(b.top, 0)
+  local right = math.min(b.right, bitmap:getWidth())
+  local bottom = math.min(b.bottom, bitmap:getHeight())
+  if right - left <= 0 or bottom - top <= 0 then
+    return bitmap
+  end
+  return Bitmap:createBitmap(bitmap, left, top, right - left, bottom - top)
+end
+
+-- Takes a screenshot, crops it to [bounds], and gives [done] a base64 JPEG string, or nil and why.
+local function capture_base64(bounds, done)
+  local ok, err = pcall(function()
+    local service = java.import('com.google.android.accessibility.talkback.TalkBackService'):getInstance()
+    if service == nil then
+      error('TalkBackService is not running')
+    end
+    local executor = service:getMainExecutor()
+    local Display = java.import('android.view.Display')
+    local Bitmap = java.import('android.graphics.Bitmap')
+    local callback = java.proxy('android.accessibilityservice.AccessibilityService$TakeScreenshotCallback', {
+      onSuccess = function(self, result)
+        local ok2, err2 = pcall(function()
+          local ByteArrayOutputStream = java.import('java.io.ByteArrayOutputStream')
+          local Base64 = java.import('android.util.Base64')
+          local buffer = result:getHardwareBuffer()
+          local bitmap = Bitmap:wrapHardwareBuffer(buffer, result:getColorSpace())
+          buffer:close()
+          if bitmap == nil then
+            error('Could not read the screenshot')
+          end
+          local software = crop_to_bounds(Bitmap, bitmap:copy(Bitmap.Config.ARGB_8888, false), bounds)
+          local stream = ByteArrayOutputStream()
+          software:compress(Bitmap.CompressFormat.JPEG, 85, stream)
+          done(Base64:encodeToString(stream:toByteArray(), Base64.NO_WRAP), nil)
+        end)
+        if not ok2 then
+          done(nil, tostring(err2))
+        end
+      end,
+      onFailure = function(self, errorCode)
+        -- Android allows only a few screenshots a second; a fast double-focus can hit this.
+        done(nil, 'takeScreenshot failed: ' .. tostring(errorCode))
+      end,
+    })
+    service:takeScreenshot(Display.DEFAULT_DISPLAY, executor, callback)
+  end)
+  if not ok then
+    done(nil, tostring(err))
+  end
+end
+
+local function first_text(parts)
+  for _, part in ipairs(parts or {}) do
+    if type(part.text) == 'string' then
+      return part.text
+    end
+  end
+end
+
+-- Same request/response shape already used (and tested) by image-describer/main.lua's Gemini path.
+local function fetch_description(base64)
+  local url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key='
+    .. gemini_api_key
+  local response = sf.fetch(url, {
+    method = 'POST',
+    body = {
+      systemInstruction = { parts = { { text = describe_prompt(device_language()) } } },
+      contents = { { role = 'user', parts = { { inlineData = { mimeType = 'image/jpeg', data = base64 } } } } },
+    },
+  })
+  if not response.ok then
+    print('describe_photo: Gemini HTTP ' .. tostring(response.status) .. ': ' .. tostring(response.body))
+    return nil
+  end
+  local data = response:json()
+  local candidate = data and data.candidates and data.candidates[1]
+  local description = candidate and candidate.content and first_text(candidate.content.parts)
+  if not description then
+    print('describe_photo: no text in Gemini response: ' .. tostring(response.body))
+  end
+  return description
+end
+
+-- Captures the photo, asks the configured AI to describe it, and speaks the result -- unless the
+-- user has already moved on to another row (count ~= focus_count) by the time it comes back.
+-- Failures of any kind (screenshot, network, parsing) are silent to speech (this is an optional
+-- add-on to the row's normal spoken description, already said by the time this is called), but
+-- a reason is printed either way, to the script's own Log screen, for diagnosis.
+local function describe_photo(r, count)
+  local image = first(r, 'image')
+  capture_base64(image and image.bounds, function(base64, capture_err)
+    if not base64 then
+      print('describe_photo: capture failed: ' .. tostring(capture_err))
+      return
+    end
+    sf.run(function()
+      local ok, description = pcall(fetch_description, base64)
+      if not ok then
+        print('describe_photo: fetch_description crashed: ' .. tostring(description))
+      elseif present(description) and count == focus_count then
+        sf.speak(tr('Photo description') .. ': ' .. description, { interrupt = false })
+      end
+    end)
+  end)
+end
 
 -- Reads the focused row and says it, or what SandFly would have said, [fallback], if it isn't a
 -- message.
@@ -500,6 +669,9 @@ local function say_row(item, fallback, count)
   local text = r and describe(r) or fallback
   if count == focus_count and present(text) then
     sf.speak(text, { interrupt = true })
+  end
+  if r and describe_photos and photo_downloaded(r) then
+    describe_photo(r, count)
   end
 end
 
